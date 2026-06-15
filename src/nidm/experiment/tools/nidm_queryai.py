@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import sys
 import click
+import requests
 from rdflib import Graph, Literal, Namespace
 from nidm.experiment.tools.click_base import cli
 
@@ -25,6 +26,12 @@ NIDM = Namespace("http://purl.org/nidash/nidm#")
 RDFS = Namespace("http://www.w3.org/2000/01/rdf-schema#")
 DCT = Namespace("http://purl.org/dc/terms/")
 RDF_NS = Namespace("http://www.w3.org/1999/02/22-rdf-syntax-ns#")
+PROV = Namespace("http://www.w3.org/ns/prov#")
+# Subjects are identified by ndar:src_subject_id.  The SAME human can appear
+# under different Person nodes (one per source file) and with differently
+# zero-padded ids ("50772" in demographics vs "0050772" in a FreeSurfer/FSL
+# derivative); the deterministic builder normalizes by stripping leading zeros.
+NDAR = Namespace("https://ndar.nih.gov/api/datadictionary/v2/dataelement/")
 # NIDM encodes a DataElement's value levels (coded value -> human label) as
 # reproschema:choices -> bnode(reproschema:value, rdfs:label).  Namespace is
 # http://schema.repronim.org/ (NOT the ".../reproschema#" form models tend to
@@ -545,13 +552,19 @@ You MUST use the exact URIs listed below — do NOT substitute or invent URIs.
 
 ## CRITICAL QUERY RULES
 
-1. **Anchor every query on ONE subject node — never join by the subject-id string.**
-   Bind the subject exactly once:
-   `?person ndar:src_subject_id ?subject_id .`
-   Then join EVERY value block to that shared `?person` node.  Do NOT
-   re-derive the person separately in each block, and do NOT join blocks
-   together by matching the `?subject_id` literal — that produces a near
-   cartesian product and is very slow.
+1. **Anchor EVERY value to a subject — a floating value block is the #1 bug.**
+   Each value's carrying entity MUST be tied back to a subject; an entity
+   variable that appears in a value triple but is not connected to a subject
+   ranges over ALL subjects and produces a cartesian product (e.g. one
+   subject's age paired with every subject's left x right volumes).
+   - Values from the SAME source file share one `?person`:
+     `?person ndar:src_subject_id ?subject_id .` then join each block to that
+     shared `?person` node (do not re-derive it per block).
+   - Values from DIFFERENT source files (e.g. demographics in one file,
+     FreeSurfer/FSL volumes in another) have DIFFERENT Person nodes AND the
+     `src_subject_id` may be zero-padded differently ("50772" vs "0050772").
+     Join those by the leading-zero-stripped id, NOT by the same person node:
+     `FILTER(REPLACE(STR(?id_a), "^0+", "") = REPLACE(STR(?id_b), "^0+", ""))`.
 
 2. **Locate each value via the PROV backbone + its resolved DE URI:**
    ```
@@ -603,6 +616,16 @@ You MUST use the exact URIs listed below — do NOT substitute or invent URIs.
    `# NOTE: no value-level definitions for <var> in the data; returning raw values`
    and select the raw value.
 
+9. **Valid SPARQL syntax only (not SQL).**
+   - SPARQL has NO `CASE`/`WHEN`/`END`.  For conditionals use the function
+     form `IF(condition, then_value, else_value)` (nestable), or a `VALUES`
+     table.  Example: `BIND(IF(?x = "1", "yes", "no") AS ?label)`.
+   - Never `BIND(... AS ?v)` to a variable `?v` that is already bound elsewhere
+     in the query — that is illegal.  Read the raw value into one variable
+     (e.g. `?sex_code`) and BIND the derived value into a NEW variable
+     (e.g. `?sex`).
+   - Use only SPARQL 1.1 built-ins (IF, COALESCE, BIND, FILTER, COUNT, etc.).
+
 ## Available Prefixes
 ```sparql
 {prefix_block}
@@ -620,13 +643,164 @@ You MUST use the exact URIs listed below — do NOT substitute or invent URIs.
 
 
 # ---------------------------------------------------------------------------
+# Phase 2 (deterministic):  build the SPARQL ourselves from resolved URIs
+# ---------------------------------------------------------------------------
+#
+# For the common "retrieve these variables per subject (optionally mapping a
+# coded value via its data-element levels)" intent, the correct query is fully
+# determined once Phase 1 has resolved the DataElement URIs.  Generating it in
+# code -- instead of asking an LLM -- makes the result identical regardless of
+# which model (Claude, GPT, a local Qwen, ...) ran Phase 1, and eliminates by
+# construction the two failure modes an LLM-authored join keeps hitting:
+#
+#   1. Cartesian products: a value block whose carrying entity is not tied back
+#      to the subject ranges over EVERY subject's entity (e.g. one subject's
+#      age paired with all N subjects' left x right hippocampus volumes).
+#   2. Cross-file no-matches: joining on the raw subject-id string silently
+#      matches nothing across files because of zero-padding ("50772"/"0050772").
+#
+# Every variable is placed in its own OPTIONAL block, anchored through the
+# universal NIDM provenance path
+#   entity -> prov:wasGeneratedBy -> activity
+#          -> prov:qualifiedAssociation -> prov:agent -> Person(src_subject_id)
+# back to the SAME leading-zero-stripped subject id.  OPTIONAL (left join) keeps
+# a subject in the output even when one variable is missing, rather than
+# dropping the row.
+
+
+def _sparql_var_name(name, used):
+    """Turn a concept name into a unique, valid SPARQL variable name."""
+    base = re.sub(r"[^0-9a-zA-Z]+", "_", str(name).strip().lower()).strip("_")
+    if not base or base[0].isdigit():
+        base = "v_" + base
+    candidate = base
+    i = 2
+    while candidate in used:
+        candidate = f"{base}_{i}"
+        i += 1
+    used.add(candidate)
+    return candidate
+
+
+def _sparql_escape(s):
+    """Escape a string for use inside a double-quoted SPARQL literal."""
+    return str(s).replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _value_map_if_chain(code_var, levels):
+    """Build a nested SPARQL IF() that maps a coded value to its label.
+
+    Falls back to the raw code for any value not present in *levels*, so an
+    unexpected code is surfaced rather than silently dropped.  *levels* is the
+    coded->label dict captured from reproschema:choices (the ONLY licensed
+    source of a mapping).
+    """
+    expr = code_var
+    for val, lab in reversed(list(levels.items())):
+        expr = f'IF({code_var} = "{_sparql_escape(val)}", "{_sparql_escape(lab)}", {expr})'
+    return expr
+
+
+def _build_deterministic_sparql(resolved_vars):
+    """Build a person-anchored, zero-pad-tolerant SELECT from resolved DE URIs.
+
+    *resolved_vars* is a list of dicts each with at least ``uri`` and ``name``;
+    an optional ``levels`` dict triggers coded->label mapping for that column.
+    Returns the SPARQL string (one row per subject, ordered by subject id).
+    """
+    used = {"subject_id", "sid_raw", "p"}
+    select_cols = ["?subject_id"]
+    blocks = []
+    for i, v in enumerate(resolved_vars):
+        col = _sparql_var_name(v.get("name", f"var_{i}"), used)
+        ent, per, sid = f"e_{i}", f"p_{i}", f"s_{i}"
+        levels = v.get("levels")
+        if levels:
+            code_var = f"?{col}_code"
+            obj = code_var
+            map_line = (
+                f"    BIND({_value_map_if_chain(code_var, levels)} AS ?{col})\n"
+            )
+        else:
+            obj = f"?{col}"
+            map_line = ""
+        blocks.append(
+            "  OPTIONAL {\n"
+            f"    ?{ent} <{v['uri']}> {obj} ;\n"
+            f"         prov:wasGeneratedBy/prov:qualifiedAssociation/prov:agent ?{per} .\n"
+            f"    ?{per} ndar:src_subject_id ?{sid} .\n"
+            f'    FILTER(REPLACE(STR(?{sid}), "^0+", "") = ?subject_id)\n'
+            f"{map_line}"
+            "  }"
+        )
+        select_cols.append(f"?{col}")
+
+    return (
+        "PREFIX prov: <http://www.w3.org/ns/prov#>\n"
+        "PREFIX ndar: <https://ndar.nih.gov/api/datadictionary/v2/dataelement/>\n\n"
+        f"SELECT {' '.join(select_cols)}\n"
+        "WHERE {\n"
+        "  # one row per distinct (leading-zero-stripped) subject id\n"
+        "  {\n"
+        "    SELECT DISTINCT ?subject_id WHERE {\n"
+        "      ?p ndar:src_subject_id ?sid_raw .\n"
+        '      BIND(REPLACE(STR(?sid_raw), "^0+", "") AS ?subject_id)\n'
+        "    }\n"
+        "  }\n\n" + "\n".join(blocks) + "\n}\nORDER BY ?subject_id\n"
+    )
+
+
+# Words/phrases that signal an analytical question (aggregation, filtering,
+# grouping) the deterministic per-subject retrieval builder does NOT handle --
+# those are routed to the LLM Phase-2 path instead.
+_ANALYTIC_RE = re.compile(
+    r"(?i)("
+    # whole words
+    r"\b(?:count|how many|number of|mean|median|sum|total|min|minimum|max|"
+    r"maximum|ratio|stdev|std dev|standard deviation|older|younger|greater|"
+    r"less than|fewer than|more than|at least|at most|between|filter|exclude|"
+    r"having|only)\b"
+    # stems (match plurals/derivations: average(s), correlation, distribution)
+    r"|\baverag\w*|\bcorrelat\w*|\bdistribut\w*|\bproportion\w*|\bpercent\w*"
+    # grouping / per-X / inline comparisons
+    r"|group(?:ed)?\s+by|\bper\s+\w+|where\s+\w+\s*[<>=]"
+    r")"
+)
+
+
+def _looks_analytical(question):
+    """True if the question implies aggregation/filtering/grouping (-> LLM).
+
+    A plain "retrieve / list / show these variables" question returns False and
+    is handled by the deterministic builder.
+    """
+    return bool(_ANALYTIC_RE.search(question or ""))
+
+
+# ---------------------------------------------------------------------------
 # AI provider interface
 # ---------------------------------------------------------------------------
 
 
-def _get_api_key():
-    """Get the API key from environment or config file."""
-    key = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY")
+def _get_api_key(provider=None):
+    """Get the API key for *provider* from the environment or config file.
+
+    When the provider is known, the provider-specific env var is used so the
+    correct key is selected even if both ANTHROPIC_API_KEY and OPENAI_API_KEY
+    are set:
+      - "openai"    -> OPENAI_API_KEY
+      - "anthropic" -> ANTHROPIC_API_KEY
+      - "llama"     -> None (a local server needs no key)
+    With no provider, falls back to whichever key is present (Anthropic first).
+    """
+    if provider == "llama":
+        return None
+    if provider == "openai":
+        key = os.environ.get("OPENAI_API_KEY")
+    elif provider == "anthropic":
+        key = os.environ.get("ANTHROPIC_API_KEY")
+    else:
+        key = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY")
     if key:
         return key
     config_path = Path.home() / ".pynidm" / "config.json"
@@ -637,11 +811,23 @@ def _get_api_key():
 
 
 def _get_provider():
-    """Determine which AI provider to use based on available API key."""
+    """Determine which AI provider to use.
+
+    Precedence: explicit PYNIDM_AI_PROVIDER env var, then a cloud API key in the
+    environment, then a configured local LLaMA server (PYNIDM_LLAMA_URL), then
+    ~/.pynidm/config.json.  Valid providers: "anthropic", "openai", "llama"
+    (a local OpenAI-compatible server such as llama.cpp's llama-server or
+    Ollama).
+    """
+    explicit = os.environ.get("PYNIDM_AI_PROVIDER")
+    if explicit:
+        return explicit.strip().lower()
     if os.environ.get("ANTHROPIC_API_KEY"):
         return "anthropic"
     if os.environ.get("OPENAI_API_KEY"):
         return "openai"
+    if os.environ.get("PYNIDM_LLAMA_URL"):
+        return "llama"
     config_path = Path.home() / ".pynidm" / "config.json"
     if config_path.exists():
         config = json.loads(config_path.read_text())
@@ -654,6 +840,15 @@ def _get_provider():
 # model deprecation doesn't require a code change.  (The previous
 # hard-coded "claude-sonnet-4-20250514" was retired and now 404s.)
 _ANTHROPIC_MODEL = os.environ.get("PYNIDM_ANTHROPIC_MODEL", "claude-sonnet-4-6")
+
+# Local LLaMA / OpenAI-compatible server (llama.cpp's llama-server, Ollama, ...).
+# No API key required.  PYNIDM_LLAMA_URL is the OpenAI-compatible base URL
+# (default = llama.cpp's llama-server on :8080); set to e.g.
+# http://localhost:11434/v1 for Ollama.  PYNIDM_LLAMA_MODEL is the model name to
+# request (llama.cpp serves whatever model it was started with and ignores it;
+# Ollama requires the model tag, e.g. "llama3").
+_LLAMA_URL = os.environ.get("PYNIDM_LLAMA_URL", "http://localhost:8080/v1")
+_LLAMA_MODEL = os.environ.get("PYNIDM_LLAMA_MODEL", "local-model")
 
 
 def _query_anthropic(system_prompt, user_question, api_key):
@@ -701,16 +896,64 @@ def _query_openai(system_prompt, user_question, api_key):
     return response.choices[0].message.content
 
 
+def _query_llama(system_prompt, user_question):
+    """Send a query to a local OpenAI-compatible LLM server (llama.cpp's
+    llama-server, Ollama, etc.).  No API key is required; the endpoint is
+    configured via PYNIDM_LLAMA_URL / PYNIDM_LLAMA_MODEL.
+    """
+    url = _LLAMA_URL.rstrip("/") + "/chat/completions"
+    payload = {
+        "model": _LLAMA_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_question},
+        ],
+        "max_tokens": 4096,
+        # deterministic generation for SPARQL/concept extraction
+        "temperature": 0,
+        "stream": False,
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=600)
+        resp.raise_for_status()
+    except requests.exceptions.ConnectionError:
+        click.echo(
+            f"Error: could not connect to a local LLM server at {_LLAMA_URL}. "
+            "Start one (e.g. `llama-server -m <model>.gguf` on :8080, or "
+            "`ollama serve`) and/or set PYNIDM_LLAMA_URL.",
+            err=True,
+        )
+        sys.exit(1)
+    except requests.exceptions.RequestException as e:
+        click.echo(f"Error querying local LLM server at {url}: {e}", err=True)
+        sys.exit(1)
+
+    try:
+        return resp.json()["choices"][0]["message"]["content"]
+    except (ValueError, KeyError, IndexError) as e:
+        click.echo(
+            f"Error: unexpected response from local LLM server at {url}: {e}",
+            err=True,
+        )
+        sys.exit(1)
+
+
 def _send_to_ai(system_prompt, user_question):
     """Send a question to the configured AI provider."""
     provider = _get_provider()
-    api_key = _get_api_key()
 
+    # Local LLaMA / OpenAI-compatible server: no API key required.
+    if provider == "llama":
+        return _query_llama(system_prompt, user_question)
+
+    api_key = _get_api_key(provider)
     if not api_key:
         click.echo(
-            "Error: No API key found. Set one of:\n"
+            "Error: No AI provider configured. Set one of:\n"
             "  - ANTHROPIC_API_KEY environment variable\n"
             "  - OPENAI_API_KEY environment variable\n"
+            "  - PYNIDM_AI_PROVIDER=llama (+ optional PYNIDM_LLAMA_URL / "
+            "PYNIDM_LLAMA_MODEL) for a local OpenAI-compatible LLM server\n"
             "  - ~/.pynidm/config.json with "
             '{"provider": "anthropic", "api_key": "sk-ant-..."}',
             err=True,
@@ -857,7 +1100,19 @@ def _format_results(results):
     default=False,
     help="Show the generated SPARQL query before executing it.",
 )
-def queryai(nidm_file_list, question, output_file, show_query):
+@click.option(
+    "--mode",
+    "-m",
+    type=click.Choice(["auto", "deterministic", "llm"]),
+    default="auto",
+    help="How Phase 2 builds the SPARQL.  'deterministic' assembles a "
+    "person-anchored, zero-pad-tolerant query in code from the resolved URIs "
+    "(identical output on any model, no cartesian products).  'llm' always "
+    "asks the AI.  'auto' (default) uses the deterministic builder for plain "
+    "'retrieve these variables' questions and the AI for analytical ones "
+    "(counts, averages, group-by, filtering).",
+)
+def queryai(nidm_file_list, question, output_file, show_query, mode):
     """AI-assisted natural-language query of NIDM files.
 
     Uses a two-phase approach:
@@ -993,6 +1248,9 @@ def queryai(nidm_file_list, question, output_file, show_query):
                         "label": selected.get("label"),
                         "laterality": selected.get("laterality"),
                         "unit": selected.get("unit"),
+                        # value levels (coded -> label), if defined in the data;
+                        # the ONLY licensed source for a coded-value mapping
+                        "levels": selected.get("levels"),
                     }
                 )
 
@@ -1009,25 +1267,61 @@ def queryai(nidm_file_list, question, output_file, show_query):
                 click.echo(f"  {v['name']} -> (handled by query pattern)", err=True)
 
         # ---- Phase 2: SPARQL generation ----
-        click.echo("\nPhase 2: Generating SPARQL query...", err=True)
-
-        # Only pass resolved vars that have URIs to the SPARQL prompt
+        # Only resolved vars that have URIs can be queried as predicates.
         vars_with_uris = [v for v in resolved_vars if v.get("uri")]
 
-        system_prompt = _build_sparql_prompt(vars_with_uris, prefixes, projects)
-        ai_response = _send_to_ai(system_prompt, q)
-        sparql_query = _extract_sparql(ai_response)
-
-        if not sparql_query:
+        # Decide how to build the query.  The deterministic builder handles the
+        # common per-subject retrieval intent reproducibly; the AI handles
+        # analytical questions (counts/averages/group-by/filtering) and any
+        # case where no variable resolved to a URI.
+        use_deterministic = mode == "deterministic" or (
+            mode == "auto" and vars_with_uris and not _looks_analytical(q)
+        )
+        if mode == "deterministic" and not vars_with_uris:
             click.echo(
-                "Error: Could not extract a SPARQL query from the AI response.",
+                "  No variables resolved to URIs; cannot build a deterministic "
+                "query.  Falling back to the AI.",
                 err=True,
             )
-            click.echo(f"AI response:\n{ai_response}", err=True)
-            return
+            use_deterministic = False
+
+        if use_deterministic:
+            click.echo(
+                "\nPhase 2: Building deterministic SPARQL (person-anchored, "
+                "no LLM)...",
+                err=True,
+            )
+            sparql_query = _build_deterministic_sparql(vars_with_uris)
+            mapped = [v["name"] for v in vars_with_uris if v.get("levels")]
+            raw = [v["name"] for v in vars_with_uris if not v.get("levels")]
+            if mapped:
+                click.echo(
+                    f"  Mapped coded values using data-element levels: "
+                    f"{', '.join(mapped)}",
+                    err=True,
+                )
+            if raw:
+                click.echo(
+                    f"  Returned raw (no value-level definitions in the data): "
+                    f"{', '.join(raw)}",
+                    err=True,
+                )
+        else:
+            click.echo("\nPhase 2: Generating SPARQL query (AI)...", err=True)
+            system_prompt = _build_sparql_prompt(vars_with_uris, prefixes, projects)
+            ai_response = _send_to_ai(system_prompt, q)
+            sparql_query = _extract_sparql(ai_response)
+
+            if not sparql_query:
+                click.echo(
+                    "Error: Could not extract a SPARQL query from the AI response.",
+                    err=True,
+                )
+                click.echo(f"AI response:\n{ai_response}", err=True)
+                return
 
         # Make the query self-contained: prepend any PREFIX declarations
-        # the AI omitted, so the shown/executed SPARQL is portable.
+        # that may be missing, so the shown/executed SPARQL is portable.
         sparql_query = _ensure_prefixes(sparql_query, prefixes)
 
         if show_query:

@@ -363,14 +363,14 @@ register for an account, then click on "MyAccount" and "API Keys" to add a new
 API key for your account.
 
 
-.. code:: bash
+.. code:: text
 
    $ bidsmri2nidm -d [ROOT BIDS DIRECT] -bidsignore
 
-   # Write one NIDM file per subject (sub-<id>_nidm.ttl) into the BIDS directory:
+   # Write one NIDM file per subject as BIDS_ROOT/sub-<id>/nidm.ttl:
    $ bidsmri2nidm -d [ROOT BIDS DIRECT] --per_subject
 
-   # Or direct the per-subject files to a different output directory:
+   # Or direct the per-subject files under a different base output directory:
    $ bidsmri2nidm -d [ROOT BIDS DIRECT] --per_subject -o [OUTPUT DIRECTORY]
 
    usage: bidsmri2nidm [-h] -d DIRECTORY [-jsonld] [-bidsignore] [-no_concepts]
@@ -394,15 +394,16 @@ API key for your account.
                         If flag set, tool will no do concept mapping
      -log LOGFILE, --log LOGFILE
                         Full path to directory to save log file. Log file name is bidsmri2nidm_[basename(args.directory)].log
-     -o OUTPUTFILE         Outputs turtle file called nidm.ttl in BIDS directory by default..or whatever path/filename is set here.
-                           In ``--per_subject`` mode this argument is interpreted as an output **directory** (created if missing)
-                           into which one ``sub-<id>_nidm.ttl`` file is written per subject.
+     -o OUTPUTFILE         Output turtle file path; defaults to nidm.ttl in the BIDS directory.  Accepts an absolute or
+                           relative path (relative paths resolve against the current working directory; missing parent
+                           directories are created).  In --per_subject mode this is the base output directory, beneath
+                           which one sub-<id>/nidm.ttl is written per subject.
      -per_subject, --per_subject
-                        If flag set, a separate NIDM turtle file will be written for each subject in the BIDS directory,
-                        named ``sub-<id>_nidm.ttl``.  By default these are placed in the BIDS directory; use ``-o`` to
-                        specify a different output directory.  When combined with ``-bidsignore``, each per-subject file
-                        is appended to the BIDS dataset's ``.bidsignore`` file (only when the output directory lies
-                        inside the BIDS tree).
+                        If flag set, a separate NIDM turtle file named nidm.ttl is written into each subject's BIDS
+                        directory, i.e. BIDS_ROOT/sub-<id>/nidm.ttl.  By default these go under the BIDS directory; use
+                        -o to specify a different base output directory.  When combined with -bidsignore, each
+                        sub-<id>/nidm.ttl is added to the BIDS dataset's .bidsignore file (when the output lies inside
+                        the BIDS tree).
 
    map variables to terms arguments:
      -json_map JSON_MAP, --json_map JSON_MAP
@@ -592,8 +593,9 @@ option is required (the group is mutually exclusive).
 QueryAI — AI-Assisted Natural Language Query
 ---------------------------------------------
 This tool translates natural-language questions about your NIDM data into
-SPARQL queries using an LLM (Anthropic Claude or OpenAI GPT).  It uses a
-two-phase approach:
+SPARQL queries using an LLM — either a cloud API (Anthropic Claude or OpenAI
+GPT) or an optional local LLM server (e.g. llama.cpp or Ollama) for fully
+offline use.  It uses a two-phase approach:
 
 1. **Phase 1 — Concept Resolution:** The AI extracts variable concepts
    (e.g. "age", "left hippocampus volume") from your question.  The tool
@@ -602,11 +604,17 @@ two-phase approach:
    ``nidm:sourceVariable`` properties.  If multiple DataElements match,
    you are prompted to select the correct one(s).
 
-2. **Phase 2 — SPARQL Generation:** The resolved URIs, along with the
-   NIDM graph structure (loaded from the bundled ``nidm_schema.json``),
-   are sent to the LLM which generates a SPARQL query.  The query is
-   executed locally against your NIDM files via rdflib — **no subject
-   data leaves your machine**.
+2. **Phase 2 — SPARQL Generation:** For a plain "retrieve these variables"
+   question the tool builds the SPARQL **itself, in code** (no LLM) from the
+   resolved URIs — a person-anchored, zero-padding-tolerant query that joins
+   every variable back to the same subject.  This is fully reproducible
+   regardless of which model ran Phase 1, and avoids the cartesian products
+   and cross-file subject-id mismatches that an LLM-authored join is prone to.
+   For analytical questions (counts, averages, group-by, filtering) the LLM
+   generates the query instead, using the NIDM graph structure loaded from the
+   bundled ``nidm_schema.json``.  Either way the query is executed locally
+   against your NIDM files via rdflib — **no subject data leaves your
+   machine**.  See *Query modes* below.
 
 .. code:: bash
 
@@ -621,18 +629,76 @@ two-phase approach:
      -o, --output_file PATH      Optional output file for results (TSV format)
      -s, --show_query            Show the generated SPARQL query before
                                  executing it
+     -m, --mode [auto|deterministic|llm]
+                                 How Phase 2 builds the SPARQL.  'deterministic'
+                                 assembles a person-anchored, zero-padding-
+                                 tolerant query in code from the resolved URIs;
+                                 'llm' always asks the AI; 'auto' (default) uses
+                                 the deterministic builder for plain retrieval
+                                 questions and the AI for analytical ones.
      --help                      Show this message and exit.
 
-**Prerequisites:**
+**Prerequisites — choose an LLM provider.**
 
-An API key for either Anthropic or OpenAI is required.  Set one of:
+``queryai`` can use a cloud API (Anthropic or OpenAI) or an optional local LLM
+server, so it can run fully offline with no API key.  The provider is selected
+by the ``PYNIDM_AI_PROVIDER`` environment variable
+(``anthropic`` | ``openai`` | ``llama``, case-insensitive); if it is unset the
+provider is auto-detected from whichever of the variables below is present.
+
+*Anthropic (Claude):*
 
 .. code:: bash
 
    export ANTHROPIC_API_KEY=sk-ant-...
+
+*OpenAI (GPT):*
+
+.. code:: bash
+
    export OPENAI_API_KEY=sk-...
 
-Or create a config file at ``~/.pynidm/config.json``:
+*Optional local server (no API key, runs offline).*  ``queryai`` can talk to any
+local **OpenAI-compatible** LLM server, so it can run with no cloud account and
+with nothing leaving your machine.  Two common backends are `llama.cpp
+<https://github.com/ggml-org/llama.cpp>`_ (its ``llama-server``) and `Ollama
+<https://ollama.com>`_.
+
+With **llama.cpp**, install it and start ``llama-server`` with an instruct model.
+``-hf`` downloads a GGUF from HuggingFace and caches it on first run, ``-ngl 99``
+offloads layers to the GPU (Apple Silicon / CUDA), and ``-c`` sets the context
+size (use a generous value — the Phase 2 prompt includes the NIDM schema):
+
+.. code:: bash
+
+   brew install llama.cpp                                          # macOS; see llama.cpp for other platforms
+
+   llama-server -hf bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M -c 16384 -ngl 99
+
+This serves an OpenAI-compatible API on ``http://localhost:8080``.  Then point
+``queryai`` at it and run as usual:
+
+.. code:: bash
+
+   export PYNIDM_AI_PROVIDER=llama
+   export PYNIDM_LLAMA_URL=http://localhost:8080/v1
+   export PYNIDM_LLAMA_MODEL=local-model     # llama.cpp ignores this; any value is fine
+
+   pynidm queryai -nl data/nidm.ttl -q "How many subjects are there?" -s
+
+To use **Ollama** instead, run ``ollama serve`` and ``ollama pull llama3``, then
+set ``PYNIDM_LLAMA_URL=http://localhost:11434/v1`` and
+``PYNIDM_LLAMA_MODEL=llama3`` (the model tag).
+
+With a local server **nothing leaves your machine** — not the question, the
+schema, or your data.  Model choice matters: a 7B model handles simple queries,
+but complex multi-variable queries are far more reliable with a 14B+ instruct
+model (e.g. ``Qwen2.5-14B-Instruct-GGUF:Q4_K_M``) if you have the memory.  Local
+models are generally less reliable than Claude/GPT at producing valid SPARQL, so
+always inspect the generated query with ``-s``.
+
+A cloud provider + key may instead be stored in a config file at
+``~/.pynidm/config.json``:
 
 .. code:: json
 
@@ -682,6 +748,29 @@ from both FreeSurfer and ANTs), you will be prompted to select::
 
    Question: How many subjects have a diagnosis of autism?
    ...
+
+**Query modes (-m).**
+
+By default (``-m auto``) a plain "retrieve / list / show these variables"
+question is answered by the **deterministic builder**: the SPARQL is assembled
+in code from the resolved DataElement URIs, so the result is identical no matter
+which model (cloud or local) ran Phase 1, and is immune to the cartesian-product
+and cross-file subject-id problems an LLM-written join can introduce.  Each
+variable is joined back to the same subject through the NIDM provenance backbone
+(``entity → prov:wasGeneratedBy → activity → prov:qualifiedAssociation →
+prov:agent → Person``), and subject ids are matched after stripping leading
+zeros so a demographics file (``50772``) lines up with a FreeSurfer/FSL
+derivative file (``0050772``).  Coded values are translated to labels **only**
+when the DataElement defines value levels (``reproschema:choices``); otherwise
+the raw value is returned and a note is printed — queryai never fabricates a
+mapping.  Analytical questions (counts, averages, group-by, filtering) are
+routed to the LLM.  Use ``-m deterministic`` or ``-m llm`` to force a path.
+
+.. code:: bash
+
+   # deterministic, reproducible, runs even with a small local model
+   pynidm queryai -nl demographics.ttl,freesurfer_cde.ttl \
+     -q "Retrieve age, sex, diagnosis, and left and right hippocampus volume" -s
 
 **Demo Script:**
 
