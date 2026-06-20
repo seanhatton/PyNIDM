@@ -18,6 +18,10 @@ from nidm.experiment.Query import (
     sparql_query_nidm,
 )
 from nidm.experiment.tools.click_base import cli
+from nidm.experiment.tools.nidm_file_utils import (
+    bundled_cde_files,
+    expand_nidm_file_list,
+)
 from nidm.experiment.tools.rest import RestParser
 
 
@@ -26,13 +30,24 @@ from nidm.experiment.tools.rest import RestParser
     "--nidm_file_list",
     "-nl",
     required=True,
-    help="A comma separated list of NIDM files with full path",
+    help="Comma-separated list of NIDM inputs.  Each entry may be a NIDM file "
+    "with full path, a directory (recursed for **/nidm.ttl), a manifest text "
+    "file (.txt/.list, one entry per line, # comments allowed), a glob, or an "
+    "http(s) URL.",
 )
 @click.option(
     "--cde_file_list",
     "-nc",
     required=False,
     help="A comma separated list of NIDM CDE files with full path. Can also be set in the CDE_DIR environment variable",
+)
+@click.option(
+    "--with_cdes",
+    "-wc",
+    is_flag=True,
+    default=False,
+    help="Seed the CDE cache with the bundled FreeSurfer/FSL/ANTS CDE files "
+    "(local copy if present, else downloaded), without having to pass -nc.",
 )
 @optgroup.group(
     "Query Type",
@@ -115,6 +130,7 @@ from nidm.experiment.tools.rest import RestParser
 def query(
     nidm_file_list,
     cde_file_list,
+    with_cdes,
     query_file,
     output_file,
     get_participants,
@@ -132,9 +148,24 @@ def query(
     """
     This function provides query support for NIDM graphs.
     """
-    # if there is a CDE file list, seed the CDE cache
+    # Expand -nl entries (files, directories recursed for **/nidm.ttl, manifest
+    # text files, globs, URLs) into a concrete file list, then rejoin to the
+    # comma-separated string the downstream query helpers expect.
+    expanded = expand_nidm_file_list(nidm_file_list)
+    if not expanded:
+        click.echo(
+            f"Error: no NIDM files found from -nl '{nidm_file_list}' "
+            "(check the path, directory, or manifest).",
+            err=True,
+        )
+        sys.exit(1)
+    nidm_file_list = ",".join(expanded)
+
+    # Seed the CDE cache: explicit -nc list, and/or the bundled CDEs via -wc.
     if cde_file_list:
         getCDEs(cde_file_list.split(","))
+    if with_cdes:
+        getCDEs(bundled_cde_files())
 
     if blaze:
         os.environ["BLAZEGRAPH_URL"] = blaze

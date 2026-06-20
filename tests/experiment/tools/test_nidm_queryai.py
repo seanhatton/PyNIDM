@@ -4,8 +4,8 @@ from __future__ import annotations
 from pathlib import Path
 from rdflib import Graph
 from nidm.experiment.tools.nidm_queryai import (
-    _extract_data_elements,
     _build_deterministic_sparql,
+    _extract_data_elements,
     _looks_analytical,
 )
 
@@ -130,7 +130,9 @@ def test_looks_analytical_routing() -> None:
         assert _looks_analytical(q) is True, q
 
 
-def test_build_deterministic_sparql_anchors_each_var_and_maps_only_from_levels() -> None:
+def test_build_deterministic_sparql_anchors_each_var_and_maps_only_from_levels() -> (
+    None
+):
     """Each variable gets its own OPTIONAL block anchored back to the SAME
     zero-stripped subject id (no floating entities -> no cartesian product),
     and a coded->label mapping is emitted ONLY for a variable that carries
@@ -138,14 +140,18 @@ def test_build_deterministic_sparql_anchors_each_var_and_maps_only_from_levels()
     q = _build_deterministic_sparql(
         [
             {"name": "age", "uri": "http://x/AGE"},
-            {"name": "sex", "uri": "http://x/SEX", "levels": {"1": "Male", "2": "Female"}},
+            {
+                "name": "sex",
+                "uri": "http://x/SEX",
+                "levels": {"1": "Male", "2": "Female"},
+            },
             {"name": "left hippocampus volume", "uri": "http://x/fs_LH"},
         ]
     )
     # one anchored OPTIONAL per variable
     assert q.count("OPTIONAL {") == 3
     # every block re-anchors to the shared subject id (driver + 3 blocks = 4)
-    assert q.count('REPLACE(STR(') == 4
+    assert q.count("REPLACE(STR(") == 4
     assert q.count("prov:wasGeneratedBy/prov:qualifiedAssociation/prov:agent") == 3
     # value mapping ONLY where levels exist
     assert 'IF(?sex_code = "1", "Male"' in q
@@ -171,20 +177,24 @@ def test_deterministic_query_joins_across_zero_padding_without_cartesian(
 
     def subj(person, sid, ent, act, triples):
         return (
-            f"niiri:{person} a prov:Agent, prov:Person ; ndar:src_subject_id \"{sid}\" .\n"
+            f'niiri:{person} a prov:Agent, prov:Person ; ndar:src_subject_id "{sid}" .\n'
             f"niiri:{act} a prov:Activity ; "
             f"prov:qualifiedAssociation [ a prov:Association ; prov:agent niiri:{person} ] .\n"
             f"niiri:{ent} a prov:Entity ; prov:wasGeneratedBy niiri:{act} ; {triples} .\n"
         )
 
     # demographics: ids are zero-stripped
-    demo = ns + subj("pA", "50772", "eA", "aA", 'x:AGE "11" ; x:SEX "1"') + subj(
-        "pB", "50773", "eB", "aB", 'x:AGE "12" ; x:SEX "2"'
+    demo = (
+        ns
+        + subj("pA", "50772", "eA", "aA", 'x:AGE "11" ; x:SEX "1"')
+        + subj("pB", "50773", "eB", "aB", 'x:AGE "12" ; x:SEX "2"')
     )
     # derivatives: ids are zero-padded; LH+RH live on ONE entity per subject
-    deriv = ns + subj(
-        "pC", "0050772", "eC", "aC", 'x:fs_LH "100.0" ; x:fs_RH "200.0"'
-    ) + subj("pD", "0050773", "eD", "aD", 'x:fs_LH "300.0" ; x:fs_RH "400.0"')
+    deriv = (
+        ns
+        + subj("pC", "0050772", "eC", "aC", 'x:fs_LH "100.0" ; x:fs_RH "200.0"')
+        + subj("pD", "0050773", "eD", "aD", 'x:fs_LH "300.0" ; x:fs_RH "400.0"')
+    )
 
     (tmp_path / "demo.ttl").write_text(demo, encoding="utf-8")
     (tmp_path / "deriv.ttl").write_text(deriv, encoding="utf-8")
@@ -196,7 +206,11 @@ def test_deterministic_query_joins_across_zero_padding_without_cartesian(
     query = _build_deterministic_sparql(
         [
             {"name": "age", "uri": "http://x/AGE"},
-            {"name": "sex", "uri": "http://x/SEX", "levels": {"1": "Male", "2": "Female"}},
+            {
+                "name": "sex",
+                "uri": "http://x/SEX",
+                "levels": {"1": "Male", "2": "Female"},
+            },
             {"name": "lh", "uri": "http://x/fs_LH"},
             {"name": "rh", "uri": "http://x/fs_RH"},
         ]

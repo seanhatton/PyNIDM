@@ -14,8 +14,8 @@ from pathlib import Path
 import re
 import sys
 import click
-import requests
 from rdflib import Graph, Literal, Namespace
+import requests
 from nidm.experiment.tools.click_base import cli
 
 # ---------------------------------------------------------------------------
@@ -697,7 +697,9 @@ def _value_map_if_chain(code_var, levels):
     """
     expr = code_var
     for val, lab in reversed(list(levels.items())):
-        expr = f'IF({code_var} = "{_sparql_escape(val)}", "{_sparql_escape(lab)}", {expr})'
+        expr = (
+            f'IF({code_var} = "{_sparql_escape(val)}", "{_sparql_escape(lab)}", {expr})'
+        )
     return expr
 
 
@@ -718,9 +720,7 @@ def _build_deterministic_sparql(resolved_vars):
         if levels:
             code_var = f"?{col}_code"
             obj = code_var
-            map_line = (
-                f"    BIND({_value_map_if_chain(code_var, levels)} AS ?{col})\n"
-            )
+            map_line = f"    BIND({_value_map_if_chain(code_var, levels)} AS ?{col})\n"
         else:
             obj = f"?{col}"
             map_line = ""
@@ -1013,8 +1013,7 @@ def _ensure_prefixes(sparql_query, prefixes):
     missing = [
         p
         for p, uri in prefixes.items()
-        if p not in declared
-        and re.search(rf"(?<![<\w]){re.escape(p)}:", sparql_query)
+        if p not in declared and re.search(rf"(?<![<\w]){re.escape(p)}:", sparql_query)
     ]
     if not missing:
         return sparql_query

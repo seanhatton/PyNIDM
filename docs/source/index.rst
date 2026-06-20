@@ -556,11 +556,17 @@ option is required (the group is mutually exclusive).
     Usage: pynidm query [OPTIONS]
 
     Options:
-      -nl, --nidm_file_list TEXT      A comma separated list of NIDM files with
-                                      full path  [required]
+      -nl, --nidm_file_list TEXT      Comma-separated NIDM inputs.  Each entry
+                                      may be a NIDM file, a directory (recursed
+                                      for **/nidm.ttl), a manifest text file
+                                      (.txt/.list, one entry per line), a glob,
+                                      or an http(s) URL  [required]
       -nc, --cde_file_list TEXT       A comma separated list of NIDM CDE files
                                       with full path. Can also be set in the
                                       CDE_DIR environment variable
+      -wc, --with_cdes                Seed the CDE cache with the bundled
+                                      FreeSurfer/FSL/ANTS CDE files (no -nc
+                                      needed)
 
       Query Type (pick exactly one):
       -q, --query_file FILENAME       Text file containing a SPARQL query to
@@ -621,12 +627,18 @@ offline use.  It uses a two-phase approach:
    Usage: pynidm queryai [OPTIONS]
 
    Options:
-     -nl, --nidm_file_list TEXT  A comma separated list of NIDM files with
-                                 full path  [required]
+     -nl, --nidm_file_list TEXT  Comma-separated NIDM inputs.  Each entry may be
+                                 a NIDM file, a directory (recursed for
+                                 **/nidm.ttl), a manifest text file (.txt/.list,
+                                 one entry per line, # comments allowed), a glob,
+                                 or an http(s) URL  [required]
+     -wc, --with_cdes            Also load the bundled FreeSurfer/FSL/ANTS CDE
+                                 files so brain-volume data elements resolve
+                                 without listing them
      -q, --question TEXT         Natural-language question to ask about the
                                  NIDM data.  If not provided, enters
                                  interactive mode.
-     -o, --output_file PATH      Optional output file for results (TSV format)
+     -o, --output_file PATH      Optional output file for results (CSV format)
      -s, --show_query            Show the generated SPARQL query before
                                  executing it
      -m, --mode [auto|deterministic|llm]
@@ -637,6 +649,23 @@ offline use.  It uses a two-phase approach:
                                  the deterministic builder for plain retrieval
                                  questions and the AI for analytical ones.
      --help                      Show this message and exit.
+
+**Supplying many NIDM files.**  Instead of a long comma-separated path list,
+``-nl`` accepts a directory (recursed for ``**/nidm.ttl``), a manifest text file
+(one path / directory / glob / URL per line, ``#`` comments allowed), a shell
+glob, or an ``http(s)`` URL — entries may be mixed and are de-duplicated.  Add
+``-wc`` to pull in the bundled FreeSurfer/FSL/ANTS CDE files automatically:
+
+.. code:: bash
+
+   # every per-subject file under a study tree, plus the CDEs, in one shot
+   pynidm queryai -nl /data/abide/derivatives -wc -q "Retrieve age, sex, and left and right hippocampus volume"
+
+   # or a manifest file listing files/dirs/URLs
+   pynidm queryai -nl nidm_files.txt -wc -q "..."
+
+This also applies to ``pynidm query`` (``-nl`` and ``-wc`` behave the same way
+there).
 
 **Prerequisites — choose an LLM provider.**
 
@@ -673,7 +702,7 @@ size (use a generous value — the Phase 2 prompt includes the NIDM schema):
 
    brew install llama.cpp                                          # macOS; see llama.cpp for other platforms
 
-   llama-server -hf bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M -c 16384 -ngl 99
+   llama-server -hf bartowski/Qwen2.5-14B-Instruct-GGUF:Q4_K_M -c 16384 -ngl 99
 
 This serves an OpenAI-compatible API on ``http://localhost:8080``.  Then point
 ``queryai`` at it and run as usual:
@@ -691,9 +720,10 @@ set ``PYNIDM_LLAMA_URL=http://localhost:11434/v1`` and
 ``PYNIDM_LLAMA_MODEL=llama3`` (the model tag).
 
 With a local server **nothing leaves your machine** — not the question, the
-schema, or your data.  Model choice matters: a 7B model handles simple queries,
-but complex multi-variable queries are far more reliable with a 14B+ instruct
-model (e.g. ``Qwen2.5-14B-Instruct-GGUF:Q4_K_M``) if you have the memory.  Local
+schema, or your data.  Model choice matters: a small 7B model only handles the
+simplest queries, so we recommend a **14B instruct model**
+(``Qwen2.5-14B-Instruct-GGUF:Q4_K_M``, shown above) for the multi-variable
+queries typical of real use — larger still if you have the memory.  Local
 models are generally less reliable than Claude/GPT at producing valid SPARQL, so
 always inspect the generated query with ``-s``.
 
@@ -771,6 +801,25 @@ routed to the LLM.  Use ``-m deterministic`` or ``-m llm`` to force a path.
    # deterministic, reproducible, runs even with a small local model
    pynidm queryai -nl demographics.ttl,freesurfer_cde.ttl \
      -q "Retrieve age, sex, diagnosis, and left and right hippocampus volume" -s
+
+**Query engine (Oxigraph).**
+
+rdflib's built-in SPARQL engine is pure-Python and can be very slow on large
+multi-file graphs (many sites + CDEs).  PyNIDM therefore depends on `oxrdflib
+<https://github.com/oxigraph/oxrdflib>`_ (the Rust-backed **Oxigraph** engine),
+installed automatically with the package, and runs SPARQL through it by default.
+This speeds up **both** ``pynidm query`` and ``pynidm queryai`` (including
+LLM-generated queries, not just the deterministic ones).  Subject joins are
+matched on a normalized (leading-zero-stripped) id materialized at load, so
+cross-file joins use a term index rather than a per-row ``REPLACE`` filter.
+
+No setup is needed.  To force the engine for a single run, set
+``PYNIDM_QUERY_ENGINE`` (``auto`` (default) | ``oxigraph`` | ``rdflib``); use
+``rdflib`` only to fall back to the built-in engine:
+
+.. code:: bash
+
+   PYNIDM_QUERY_ENGINE=rdflib pynidm query -nl data/nidm.ttl -q query.rq
 
 **Demo Script:**
 
