@@ -17,6 +17,7 @@ import click
 from rdflib import Graph, Literal, Namespace
 import requests
 from nidm.experiment.tools.click_base import cli
+from nidm.experiment.tools.nidm_file_utils import expand_nidm_file_list
 
 # ---------------------------------------------------------------------------
 # Namespace constants
@@ -1074,7 +1075,19 @@ def _format_results(results):
     "--nidm_file_list",
     "-nl",
     required=True,
-    help="A comma-separated list of NIDM files with full path.",
+    help="Comma-separated list of NIDM inputs.  Each entry may be a NIDM file "
+    "with full path, a directory (recursed for **/nidm.ttl), a manifest text "
+    "file (.txt/.list, one entry per line, # comments allowed), a glob, or an "
+    "http(s) URL.",
+)
+@click.option(
+    "--with_cdes",
+    "-wc",
+    is_flag=True,
+    default=False,
+    help="Also load the bundled FreeSurfer/FSL/ANTS CDE files (local copy if "
+    "present, else downloaded) so brain-volume concepts resolve without "
+    "listing them by hand.",
 )
 @click.option(
     "--question",
@@ -1111,7 +1124,7 @@ def _format_results(results):
     "'retrieve these variables' questions and the AI for analytical ones "
     "(counts, averages, group-by, filtering).",
 )
-def queryai(nidm_file_list, question, output_file, show_query, mode):
+def queryai(nidm_file_list, with_cdes, question, output_file, show_query, mode):
     """AI-assisted natural-language query of NIDM files.
 
     Uses a two-phase approach:
@@ -1134,9 +1147,21 @@ def queryai(nidm_file_list, question, output_file, show_query, mode):
       pynidm queryai -nl data/nidm.ttl   (interactive mode)
     """
 
-    # Parse file list
-    nidm_files = [f.strip() for f in nidm_file_list.split(",") if f.strip()]
+    # Expand -nl entries (files, directories recursed for **/nidm.ttl, manifest
+    # text files, globs, http(s) URLs) into a concrete file list; append the
+    # bundled CDE files when -wc is given so they are parsed for concepts.
+    nidm_files = expand_nidm_file_list(nidm_file_list, include_cdes=with_cdes)
+    if not nidm_files:
+        click.echo(
+            f"Error: no NIDM files found from -nl '{nidm_file_list}' "
+            "(check the path, directory, or manifest).",
+            err=True,
+        )
+        sys.exit(1)
     for f in nidm_files:
+        # URLs are fetched by rdflib at parse time; only validate local paths.
+        if f.startswith(("http://", "https://")):
+            continue
         if not os.path.isfile(f):
             click.echo(f"Error: File not found: {f}", err=True)
             sys.exit(1)
