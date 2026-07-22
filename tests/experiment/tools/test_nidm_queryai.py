@@ -2,12 +2,37 @@
 
 from __future__ import annotations
 from pathlib import Path
+from click.testing import CliRunner
 from rdflib import Graph
+from nidm.experiment.tools import nidm_queryai as _qai
 from nidm.experiment.tools.nidm_queryai import (
     _build_deterministic_sparql,
     _extract_data_elements,
     _looks_analytical,
+    queryai,
 )
+
+
+def test_queryai_nl_expands_directory(tmp_path: Path, monkeypatch) -> None:
+    """Regression: ``-nl <dir>`` must recurse for ``**/nidm.ttl`` (not error
+    'File not found' by treating the directory as a literal file).  We stop
+    right after file resolution so no AI/API call is made."""
+    study = tmp_path / "CMU_a"
+    study.mkdir()
+    (study / "nidm.ttl").write_text("")
+
+    captured = {}
+
+    def _fake_extract(files):
+        captured["files"] = list(files)
+        raise SystemExit(0)  # short-circuit before Phase 1 / the AI call
+
+    monkeypatch.setattr(_qai, "_extract_data_elements", _fake_extract)
+
+    result = CliRunner().invoke(queryai, ["-nl", str(study), "-q", "x"])
+
+    assert "File not found" not in result.output, result.output
+    assert captured.get("files") == [str(study / "nidm.ttl")]
 
 
 def test_extract_data_elements_captures_value_levels(tmp_path: Path) -> None:
