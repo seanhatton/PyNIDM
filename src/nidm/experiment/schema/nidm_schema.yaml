@@ -243,6 +243,12 @@ classes:
         slot_uri: nidm:Task
         range: string
         description: Task name for functional MRI
+      run:
+        slot_uri: nidm:AcquisitionObject
+        range: integer
+        description: >-
+          Run number for the acquisition (BIDS run entity).  Written by
+          bidsmri2nidm/csv2nidm as nidm:AcquisitionObject with an integer value.
       filename:
         slot_uri: nfo:filename
         range: string

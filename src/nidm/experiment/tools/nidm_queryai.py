@@ -18,6 +18,7 @@ from rdflib import Graph, Literal, Namespace
 import requests
 from nidm.experiment.tools.click_base import cli
 from nidm.experiment.tools.nidm_file_utils import expand_nidm_file_list
+from nidm.experiment.tools.query_terms import resolve_query_term
 
 # ---------------------------------------------------------------------------
 # Namespace constants
@@ -751,6 +752,34 @@ def _build_deterministic_sparql(resolved_vars):
     )
 
 
+def _build_direct_predicate_sparql(direct_vars):
+    """Build a DISTINCT-values SELECT over NIDM/BIDS predicates stored directly
+    on entities (e.g. ``nidm:Task``, ``bids:session_number``, ``nfo:filename``).
+
+    Answers "what tasks / sessions / runs / files are in this data?" -- one
+    column per resolved predicate, distinct rows.  Unlike the person-anchored
+    :func:`_build_deterministic_sparql`, these facts are properties of the
+    acquisition/derivative objects themselves and are not joined to a subject.
+
+    *direct_vars* is a list of dicts each with at least ``uri`` and ``name``.
+    Returns the SPARQL query string.
+    """
+    used = set()
+    select_cols = []
+    blocks = []
+    for i, v in enumerate(direct_vars):
+        col = _sparql_var_name(v.get("name", f"var_{i}"), used)
+        select_cols.append(f"?{col}")
+        # each predicate is matched on its own entity variable so the columns
+        # are independent (a distinct list per predicate)
+        blocks.append(f"  ?e_{i} <{v['uri']}> ?{col} .")
+    return (
+        f"SELECT DISTINCT {' '.join(select_cols)}\n"
+        "WHERE {\n" + "\n".join(blocks) + "\n}\n"
+        f"ORDER BY {' '.join(select_cols)}\n"
+    )
+
+
 # Words/phrases that signal an analytical question (aggregation, filtering,
 # grouping) the deterministic per-subject retrieval builder does NOT handle --
 # those are routed to the LLM Phase-2 path instead.
@@ -1233,6 +1262,37 @@ def queryai(nidm_file_list, with_cdes, question, output_file, show_query, mode):
                         break
 
             if not matches:
+                # Not a DataElement -- try the direct-predicate registry.  Terms
+                # like task / session / run / filename / scan metadata are stored
+                # as predicates on the acquisition object (nidm:Task,
+                # bids:session_number, ...), not as DataElement nodes, so they
+                # never appear in `data_elements`.
+                direct = resolve_query_term(name)
+                if direct is None:
+                    for kw in concept.get("keywords", []):
+                        direct = resolve_query_term(kw)
+                        if direct:
+                            break
+                if direct is not None:
+                    click.echo(
+                        f"  Found direct NIDM predicate: {direct['qname']}",
+                        err=True,
+                    )
+                    resolved_vars.append(
+                        {
+                            "name": name,
+                            "role": role,
+                            "qname": direct["qname"],
+                            "uri": direct["uri"],
+                            "label": None,
+                            # marks this as a predicate on an entity (queried
+                            # directly) rather than a DataElement value.
+                            "direct_predicate": True,
+                        }
+                    )
+                    continue
+
+            if not matches:
                 click.echo(
                     f"  WARNING: No DataElement found for '{name}'. "
                     f"This variable will be omitted from the query.",
@@ -1293,13 +1353,26 @@ def queryai(nidm_file_list, with_cdes, question, output_file, show_query, mode):
         # ---- Phase 2: SPARQL generation ----
         # Only resolved vars that have URIs can be queried as predicates.
         vars_with_uris = [v for v in resolved_vars if v.get("uri")]
+        # Direct predicates (nidm:Task, bids:session_number, ...) are queried as
+        # properties of the acquisition/derivative object itself; DataElement
+        # vars are person-anchored.
+        direct_vars = [v for v in vars_with_uris if v.get("direct_predicate")]
+        de_vars = [v for v in vars_with_uris if not v.get("direct_predicate")]
 
-        # Decide how to build the query.  The deterministic builder handles the
-        # common per-subject retrieval intent reproducibly; the AI handles
+        # Decide how to build the query.  The direct builder lists distinct
+        # values of direct predicates; the deterministic builder handles the
+        # common per-subject DataElement retrieval reproducibly; the AI handles
         # analytical questions (counts/averages/group-by/filtering) and any
         # case where no variable resolved to a URI.
-        use_deterministic = mode == "deterministic" or (
-            mode == "auto" and vars_with_uris and not _looks_analytical(q)
+        use_direct = (
+            mode in ("auto", "deterministic")
+            and direct_vars
+            and not de_vars
+            and not _looks_analytical(q)
+        )
+        use_deterministic = (not use_direct) and (
+            mode == "deterministic"
+            or (mode == "auto" and de_vars and not _looks_analytical(q))
         )
         if mode == "deterministic" and not vars_with_uris:
             click.echo(
@@ -1309,13 +1382,19 @@ def queryai(nidm_file_list, with_cdes, question, output_file, show_query, mode):
             )
             use_deterministic = False
 
-        if use_deterministic:
+        if use_direct:
+            click.echo(
+                "\nPhase 2: Building direct-predicate SPARQL (no LLM)...",
+                err=True,
+            )
+            sparql_query = _build_direct_predicate_sparql(direct_vars)
+        elif use_deterministic:
             click.echo(
                 "\nPhase 2: Building deterministic SPARQL (person-anchored, "
                 "no LLM)...",
                 err=True,
             )
-            sparql_query = _build_deterministic_sparql(vars_with_uris)
+            sparql_query = _build_deterministic_sparql(de_vars or vars_with_uris)
             mapped = [v["name"] for v in vars_with_uris if v.get("levels")]
             raw = [v["name"] for v in vars_with_uris if not v.get("levels")]
             if mapped:
