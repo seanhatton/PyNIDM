@@ -180,17 +180,11 @@ def query(
     elif get_instruments:
         # first get all project UUIDs then iterate and get instruments adding to output dataframe
         project_list = GetProjectsUUID(nidm_file_list.split(","))
-        count = 1
-        for project in project_list:
-            if count == 1:
-                df = GetProjectInstruments(
-                    nidm_file_list.split(","), project_id=project
-                )
-                count += 1
-            else:
-                df = df.append(
-                    GetProjectInstruments(nidm_file_list.split(","), project_id=project)
-                )
+        frames = [
+            GetProjectInstruments(nidm_file_list.split(","), project_id=project)
+            for project in project_list
+        ]
+        df = pd.concat(frames) if frames else pd.DataFrame()
 
         # write dataframe
         # if output file parameter specified
@@ -206,19 +200,11 @@ def query(
     elif get_instrument_vars:
         # first get all project UUIDs then iterate and get instruments adding to output dataframe
         project_list = GetProjectsUUID(nidm_file_list.split(","))
-        count = 1
-        for project in project_list:
-            if count == 1:
-                df = GetInstrumentVariables(
-                    nidm_file_list.split(","), project_id=project
-                )
-                count += 1
-            else:
-                df = df.append(
-                    GetInstrumentVariables(
-                        nidm_file_list.split(","), project_id=project
-                    )
-                )
+        frames = [
+            GetInstrumentVariables(nidm_file_list.split(","), project_id=project)
+            for project in project_list
+        ]
+        df = pd.concat(frames) if frames else pd.DataFrame()
 
         # write dataframe
         # if output file parameter specified
