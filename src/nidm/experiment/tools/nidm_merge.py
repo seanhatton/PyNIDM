@@ -1,7 +1,7 @@
 """Tools for working with NIDM-Experiment files"""
 
 import click
-from rdflib import Graph, util
+from rdflib import Graph, URIRef, util
 from nidm.core import Constants
 from nidm.experiment.Query import GetParticipantIDs
 from nidm.experiment.tools.click_base import cli
@@ -99,6 +99,7 @@ def merge(nidm_file_list, s, out_file):
                         uuid_replacement = first_file_subjids.iloc[
                             [*filter(t.get, t.index)][0], 0
                         ]
+                        uuid_replacement = URIRef(str(uuid_replacement))
 
                         for s, p, o in graph.triples((None, None, None)):
                             if s == row["uuid"]:
