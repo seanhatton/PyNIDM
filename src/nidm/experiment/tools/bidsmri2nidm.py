@@ -311,6 +311,34 @@ def addbidsignore(directory, filename_to_add):
                     print(filename_to_add, file=text_file)
 
 
+def _read_scan_sidecar(directory, file_tpl):
+    """Return the per-scan JSON sidecar dict paired with *file_tpl*.
+
+    Reads the sidecar JSON file directly (e.g. ``sub-01_T1w.json`` next to
+    ``sub-01_T1w.nii.gz``) rather than relying on the pybids
+    ``BIDSFile.metadata`` API, whose shape varies across pybids versions.
+    This mirrors the LinkML tool's ``_load_sidecar_metadata`` so both tools
+    emit identical per-scan metadata predicates.  Returns ``{}`` when the
+    sidecar is absent or malformed (matches legacy quiet-failure).
+    """
+    scan_path = join(directory, file_tpl.dirname, file_tpl.filename)
+    name = os.path.basename(scan_path)
+    stem = name
+    for ext in (".nii.gz", ".nii"):
+        if name.endswith(ext):
+            stem = name[: -len(ext)]
+            break
+    sidecar = join(os.path.dirname(scan_path), stem + ".json")
+    if not isfile(sidecar):
+        return {}
+    try:
+        with open(sidecar, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        logging.warning("malformed or unreadable sidecar JSON: %s; ignoring", sidecar)
+        return {}
+
+
 def addimagingsessions(
     bids_layout,
     subject_id,
@@ -438,27 +466,22 @@ def addimagingsessions(
                 )
             # get associated JSON file if exists
             # There is T1w.json file with information
-            json_data = (
-                bids_layout.get(suffix=file_tpl.entities["suffix"], subject=subject_id)
-            )[0].metadata
-            if len(json_data.info) > 0:
-                for key in json_data.info.items():
-                    if key in BIDS_Constants.json_keys:
-                        if isinstance(json_data.info[key], list):
+            json_data = _read_scan_sidecar(directory, file_tpl)
+            if len(json_data) > 0:
+                for key, value in json_data.items():
+                    normalized_key = key.replace(" ", "_")
+                    if normalized_key in BIDS_Constants.json_keys:
+                        if isinstance(value, list):
                             acq_obj.add_attributes(
                                 {
-                                    BIDS_Constants.json_keys[
-                                        key.replace(" ", "_")
-                                    ]: "".join(str(e) for e in json_data.info[key])
+                                    BIDS_Constants.json_keys[normalized_key]: "".join(
+                                        str(e) for e in value
+                                    )
                                 }
                             )
                         else:
                             acq_obj.add_attributes(
-                                {
-                                    BIDS_Constants.json_keys[
-                                        key.replace(" ", "_")
-                                    ]: json_data.info[key]
-                                }
+                                {BIDS_Constants.json_keys[normalized_key]: value}
                             )
 
             # Parse T1w.json file in BIDS directory to add the attributes contained inside
@@ -583,35 +606,30 @@ def addimagingsessions(
                 )
 
             # get associated JSON file if exists
-            json_data = (
-                bids_layout.get(suffix=file_tpl.entities["suffix"], subject=subject_id)
-            )[0].metadata
+            json_data = _read_scan_sidecar(directory, file_tpl)
 
-            if len(json_data.info) > 0:
-                for key in json_data.info.items():
-                    if key in BIDS_Constants.json_keys:
-                        if isinstance(json_data.info[key], list):
+            if len(json_data) > 0:
+                for key, value in json_data.items():
+                    normalized_key = key.replace(" ", "_")
+                    if normalized_key in BIDS_Constants.json_keys:
+                        if isinstance(value, list):
                             acq_obj.add_attributes(
                                 {
-                                    BIDS_Constants.json_keys[
-                                        key.replace(" ", "_")
-                                    ]: "".join(str(e) for e in json_data.info[key])
+                                    BIDS_Constants.json_keys[normalized_key]: "".join(
+                                        str(e) for e in value
+                                    )
                                 }
                             )
                         else:
                             acq_obj.add_attributes(
-                                {
-                                    BIDS_Constants.json_keys[
-                                        key.replace(" ", "_")
-                                    ]: json_data.info[key]
-                                }
+                                {BIDS_Constants.json_keys[normalized_key]: value}
                             )
             # get associated events TSV file
             if "run" in file_tpl.entities:
                 events_file = bids_layout.get(
                     subject=subject_id,
                     extension=[".tsv"],
-                    modality=file_tpl.entities["datatype"],
+                    datatype=file_tpl.entities["datatype"],
                     task=file_tpl.entities["task"],
                     run=file_tpl.entities["run"],
                 )
@@ -619,7 +637,7 @@ def addimagingsessions(
                 events_file = bids_layout.get(
                     subject=subject_id,
                     extension=[".tsv"],
-                    modality=file_tpl.entities["datatype"],
+                    datatype=file_tpl.entities["datatype"],
                     task=file_tpl.entities["task"],
                 )
             # if there is an events file then this is task-based so create an acquisition object for the task file and link
@@ -631,12 +649,20 @@ def addimagingsessions(
                 # Modified 7/22/23 to add acq_entity to collection
                 session.graph.hadMember(collection, events_obj)
 
+                # base nidm:AcquisitionObject type -- LinkML stamps it on every
+                # acquisition object, so add it here for the events object too so
+                # its rdf:type set matches (parity with the LinkML tool).
+                events_obj.add_attributes(
+                    {PROV_TYPE: Constants.NIDM_ACQUISITION_ENTITY}
+                )
                 events_obj.add_attributes(
                     {
                         PROV_TYPE: Constants.NIDM_MRI_BOLD_EVENTS,
-                        BIDS_Constants.json_keys["TaskName"]: json_data["TaskName"],
+                        BIDS_Constants.json_keys["TaskName"]: json_data.get(
+                            "TaskName", file_tpl.entities["task"]
+                        ),
                         Constants.NIDM_FILENAME: getRelPathToBIDS(
-                            events_file[0].filename, directory, bidsuri_format=True
+                            events_file[0].path, directory, bidsuri_format=True
                         ),
                     }
                 )
@@ -646,14 +672,16 @@ def addimagingsessions(
                 # add source links for this file
                 # add git-annex/datalad info if exists
                 num_sources = addGitAnnexSources(
-                    obj=events_obj, filepath=events_file, bids_root=directory
+                    obj=events_obj,
+                    filepath=events_file[0].path,
+                    bids_root=directory,
                 )
 
                 # if there aren't any git annex sources then just store the local directory information
                 if num_sources == 0:
                     # WIP: add absolute location of BIDS directory on disk for later finding of files
                     events_obj.add_attributes(
-                        {Constants.PROV["Location"]: "file:/" + events_file}
+                        {Constants.PROV["Location"]: "file:/" + events_file[0].path}
                     )
 
             # Parse task-rest_bold.json file in BIDS directory to add the attributes contained inside
@@ -775,28 +803,23 @@ def addimagingsessions(
                 acq_obj.add_attributes({BIDS_Constants.json_keys["run"]: file_tpl.run})
 
             # get associated JSON file if exists
-            json_data = (
-                bids_layout.get(suffix=file_tpl.entities["suffix"], subject=subject_id)
-            )[0].metadata
+            json_data = _read_scan_sidecar(directory, file_tpl)
 
-            if len(json_data.info) > 0:
-                for key in json_data.info.items():
-                    if key in BIDS_Constants.json_keys:
-                        if isinstance(json_data.info[key], list):
+            if len(json_data) > 0:
+                for key, value in json_data.items():
+                    normalized_key = key.replace(" ", "_")
+                    if normalized_key in BIDS_Constants.json_keys:
+                        if isinstance(value, list):
                             acq_obj.add_attributes(
                                 {
-                                    BIDS_Constants.json_keys[
-                                        key.replace(" ", "_")
-                                    ]: "".join(str(e) for e in json_data.info[key])
+                                    BIDS_Constants.json_keys[normalized_key]: "".join(
+                                        str(e) for e in value
+                                    )
                                 }
                             )
                         else:
                             acq_obj.add_attributes(
-                                {
-                                    BIDS_Constants.json_keys[
-                                        key.replace(" ", "_")
-                                    ]: json_data.info[key]
-                                }
+                                {BIDS_Constants.json_keys[normalized_key]: value}
                             )
 
             # check if separate M0 scan exists, if so add location and filename
@@ -830,7 +853,11 @@ def addimagingsessions(
             # add image usage type
             if file_tpl.entities["datatype"] in BIDS_Constants.scans:
                 acq_obj.add_attributes(
-                    {Constants.NIDM_IMAGE_USAGE_TYPE: BIDS_Constants.scans["dti"]}
+                    {
+                        Constants.NIDM_IMAGE_USAGE_TYPE: BIDS_Constants.scans[
+                            file_tpl.entities["datatype"]
+                        ]
+                    }
                 )
             else:
                 logging.info(
@@ -875,28 +902,23 @@ def addimagingsessions(
                 )
 
             # get associated JSON file if exists
-            json_data = (
-                bids_layout.get(suffix=file_tpl.entities["suffix"], subject=subject_id)
-            )[0].metadata
+            json_data = _read_scan_sidecar(directory, file_tpl)
 
-            if len(json_data.info) > 0:
-                for key in json_data.info.items():
-                    if key in BIDS_Constants.json_keys:
-                        if isinstance(json_data.info[key], list):
+            if len(json_data) > 0:
+                for key, value in json_data.items():
+                    normalized_key = key.replace(" ", "_")
+                    if normalized_key in BIDS_Constants.json_keys:
+                        if isinstance(value, list):
                             acq_obj.add_attributes(
                                 {
-                                    BIDS_Constants.json_keys[
-                                        key.replace(" ", "_")
-                                    ]: "".join(str(e) for e in json_data.info[key])
+                                    BIDS_Constants.json_keys[normalized_key]: "".join(
+                                        str(e) for e in value
+                                    )
                                 }
                             )
                         else:
                             acq_obj.add_attributes(
-                                {
-                                    BIDS_Constants.json_keys[
-                                        key.replace(" ", "_")
-                                    ]: json_data.info[key]
-                                }
+                                {BIDS_Constants.json_keys[normalized_key]: value}
                             )
             # bval files
             try:
@@ -907,6 +929,9 @@ def addimagingsessions(
                 # Modified 7/22/23 to add acq_entity to collection
                 session.graph.hadMember(collection, acq_obj_bval)
 
+                acq_obj_bval.add_attributes(
+                    {PROV_TYPE: Constants.NIDM_ACQUISITION_ENTITY}
+                )
                 acq_obj_bval.add_attributes({PROV_TYPE: BIDS_Constants.scans["bval"]})
                 # add file link to bval files
                 acq_obj_bval.add_attributes(
@@ -935,18 +960,21 @@ def addimagingsessions(
                 )
 
                 # add sha512 sum
-                if isfile(join(directory, file_tpl.dirname, file_tpl.filename)):
+                # NOTE: hash the .bval file itself (not the DWI nifti) so the
+                # bval AcquisitionObject carries sha512(bval), matching the
+                # LinkML tool's _attach_bval_file.
+                bval_file = join(
+                    file_tpl.dirname,
+                    bids_layout.get_bval(join(file_tpl.dirname, file_tpl.filename)),
+                )
+                if isfile(bval_file):
                     acq_obj_bval.add_attributes(
-                        {
-                            Constants.CRYPTO_SHA512: getsha512(
-                                join(directory, file_tpl.dirname, file_tpl.filename)
-                            )
-                        }
+                        {Constants.CRYPTO_SHA512: getsha512(bval_file)}
                     )
                 else:
                     logging.info(
                         "WARNING file %s doesn't exist! No SHA512 sum stored in NIDM files...",
-                        join(directory, file_tpl.dirname, file_tpl.filename),
+                        bval_file,
                     )
             except Exception as e:
                 logging.warning(
@@ -983,6 +1011,9 @@ def addimagingsessions(
 
                     # Add acq_entity to collection
                     session.graph.hadMember(collection, acq_obj_bvec)
+                    acq_obj_bvec.add_attributes(
+                        {PROV_TYPE: Constants.NIDM_ACQUISITION_ENTITY}
+                    )
                     acq_obj_bvec.add_attributes(
                         {PROV_TYPE: BIDS_Constants.scans["bvec"]}
                     )
@@ -1423,14 +1454,15 @@ def bidsmri2project(
                     img_session=img_session,
                 )
         # else we have no ses-* directories in the BIDS layout
-        addimagingsessions(
-            bids_layout=bids_layout,
-            subject_id=subject_id,
-            session=Session(project),
-            participant=participant,
-            directory=directory,
-            collection=collection,
-        )
+        else:
+            addimagingsessions(
+                bids_layout=bids_layout,
+                subject_id=subject_id,
+                session=Session(project),
+                participant=participant,
+                directory=directory,
+                collection=collection,
+            )
 
     # Added temporarily to support phenotype files
     # for each *.tsv / *.json file pair in the phenotypes directory
@@ -1488,10 +1520,9 @@ def bidsmri2project(
                 # when per-subject mode is in use, skip phenotype rows for other
                 # subjects (compare with leading zeros stripped, matching the
                 # participants.tsv handling above)
-                if (
-                    subject_filter is not None
-                    and sid.lstrip("0") != subject_filter.lstrip("0")
-                ):
+                if subject_filter is not None and sid.lstrip(
+                    "0"
+                ) != subject_filter.lstrip("0"):
                     continue
                 # add acquisition object
                 acq = AssessmentAcquisition(session=session[sid])
