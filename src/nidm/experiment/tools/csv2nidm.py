@@ -838,56 +838,66 @@ def csv2nidm_main(args=None):
                         },
                     )
 
-                # if this isn't derivative data...
-                if not args.derivative:
-                    # add an assessment acquisition for the phenotype data to session and associate with agent
-                    # acq=AssessmentAcquisition(session=nidm_session)
+            # if this isn't derivative data...
+            # NOTE (regression fix): this block was accidentally nested inside
+            # `if args.derivative:` by commit ec62db1c (2025-04-08, derivative
+            # support), making it unreachable dead code -- so csv2nidm -nidm
+            # assessment mode silently dropped the appended CSV values.  Dedented
+            # back to a reachable sibling of the derivative branch, restoring the
+            # pre-2025-04 behavior (attach the values to a new assessment
+            # acquisition on the existing subject).
+            if not args.derivative:
+                # add an assessment acquisition for the phenotype data to session and associate with agent
+                # acq=AssessmentAcquisition(session=nidm_session)
 
-                    # create a new session for this assessment
-                    new_session = Session(project=project)
+                # create a new session for this assessment
+                new_session = Session(project=project)
 
-                    acq = AssessmentAcquisition(session=new_session)
-                    # add acquisition entity for assessment
-                    acq_entity = AssessmentObject(acquisition=acq)
-                    # add qualified association with existing agent
-                    acq.add_qualified_association(
-                        person=subject_uuid["person_uuid"][0],
-                        role=Constants.NIDM_PARTICIPANT,
-                    )
+                acq = AssessmentAcquisition(session=new_session)
+                # add acquisition entity for assessment
+                acq_entity = AssessmentObject(acquisition=acq)
+                # add qualified association with existing agent
+                acq.add_qualified_association(
+                    person=subject_uuid["person_uuid"][0],
+                    role=Constants.NIDM_PARTICIPANT,
+                )
 
-                    # add git-annex info if exists
-                    num_sources = addGitAnnexSources(
-                        obj=acq_entity,
-                        filepath=args.csv_file,
-                        bids_root=dirname(args.csv_file),
-                    )
-                    # if there aren't any git annex sources then just store the local directory information
-                    if num_sources == 0:
-                        # WIP: add absolute location of BIDS directory on disk for later finding of files
-                        acq_entity.add_attributes(
-                            {Constants.PROV["Location"]: "file:/" + args.csv_file}
-                        )
-
-                    # store file to acq_entity
+                # add git-annex info if exists
+                num_sources = addGitAnnexSources(
+                    obj=acq_entity,
+                    filepath=args.csv_file,
+                    bids_root=dirname(args.csv_file),
+                )
+                # if there aren't any git annex sources then just store the local directory information
+                if num_sources == 0:
+                    # WIP: add absolute location of BIDS directory on disk for later finding of files
                     acq_entity.add_attributes(
-                        {Constants.NIDM_FILENAME: basename(args.csv_file)}
+                        {Constants.PROV["Location"]: "file:/" + args.csv_file}
                     )
 
-                    # store other data from row with columns_to_term mappings
-                    for row_variable in df_row:
-                        # check if row_variable is subject id, if so skip it
-                        if row_variable == id_field:
-                            continue
-                        else:
-                            if str(df_row[row_variable]) != "nan":
-                                add_attributes_with_cde(
-                                    acq_entity,
-                                    cde,
-                                    row_variable,
-                                    Literal(df_row[row_variable]),
-                                )
+                # store file to acq_entity
+                acq_entity.add_attributes(
+                    {Constants.NIDM_FILENAME: basename(args.csv_file)}
+                )
 
-                    continue
+                # store other data from row with columns_to_term mappings.
+                # Iterate COLUMN NAMES via .keys(); a plain ``for x in df_row``
+                # iterates the Series' VALUES, so ``df_row[value]`` raised
+                # KeyError -- another latent bug in this previously-dead block.
+                for row_variable in df_row.keys():
+                    # check if row_variable is subject id, if so skip it
+                    if row_variable == id_field:
+                        continue
+                    else:
+                        if str(df_row[row_variable]) != "nan":
+                            add_attributes_with_cde(
+                                acq_entity,
+                                cde,
+                                row_variable,
+                                Literal(df_row[row_variable]),
+                            )
+
+                continue
         if args.logfile:
             logging.info("Adding CDEs to graph....")
         else:
