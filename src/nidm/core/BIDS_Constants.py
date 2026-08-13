@@ -33,6 +33,17 @@ scans = {
     "dwi": Constants.NIDM_MRI_DWI_SCAN,
     "bval": Constants.NIDM_MRI_DWI_BVAL,
     "bvec": Constants.NIDM_MRI_DWI_BVEC,
+    # Field maps -- both the fmap/ datatype and the BIDS fieldmap suffixes
+    # (some datasets, e.g. ABIDE II, misplace _fieldmap scans inside dwi/).
+    "fmap": Constants.NIDM_MRI_FIELDMAP,
+    "fieldmap": Constants.NIDM_MRI_FIELDMAP,
+    "epi": Constants.NIDM_MRI_FIELDMAP,
+    "phasediff": Constants.NIDM_MRI_FIELDMAP,
+    "phase1": Constants.NIDM_MRI_FIELDMAP,
+    "phase2": Constants.NIDM_MRI_FIELDMAP,
+    "magnitude": Constants.NIDM_MRI_FIELDMAP,
+    "magnitude1": Constants.NIDM_MRI_FIELDMAP,
+    "magnitude2": Constants.NIDM_MRI_FIELDMAP,
     "T1w": Constants.NIDM_MRI_T1,
     "T2w": Constants.NIDM_MRI_T2,
     "inplaneT2": Constants.NIDM_MRI_T2,

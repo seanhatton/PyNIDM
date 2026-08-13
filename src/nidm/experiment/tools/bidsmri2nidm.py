@@ -38,6 +38,22 @@ from nidm.experiment.Utils import (
     map_variables_to_terms,
 )
 
+# BIDS field-map suffixes.  These scans carry FieldMap usage regardless of the
+# directory they live in -- some datasets (e.g. ABIDE II) place _fieldmap scans
+# inside dwi/ rather than fmap/, and they must NOT be labeled DiffusionWeighted.
+_FIELDMAP_SUFFIXES = frozenset(
+    {
+        "fieldmap",
+        "epi",
+        "phasediff",
+        "phase1",
+        "phase2",
+        "magnitude",
+        "magnitude1",
+        "magnitude2",
+    }
+)
+
 
 def getRelPathToBIDS(filepath, bids_root, bidsuri_format=False):
     """
@@ -211,7 +227,7 @@ and API Keys.  Then set the environment variable INTERLEX_API_KEY with your key.
         shared_project_uuid = getUUID()
         shared_dataset_uuid = getUUID()
 
-        subjects = bids.BIDSLayout(directory).get_subjects()
+        subjects = bids.BIDSLayout(directory, validate=False).get_subjects()
         for subj in subjects:
             if subj.startswith("."):
                 continue
@@ -395,6 +411,68 @@ def addimagingsessions(
                 role=Constants.NIDM_PARTICIPANT,
             )
 
+        # Field maps (BIDS fmap suffixes) may live in a proper fmap/ directory
+        # OR be misplaced inside dwi/ (e.g. ABIDE II).  Handle them by SUFFIX so
+        # they get FieldMap usage regardless of directory, and skip the
+        # datatype-based branches below (which would mislabel a dwi/-dir fieldmap
+        # as DiffusionWeighted).  Mirrors the generic image handling: usage,
+        # filename, git-annex sources, sha512, run, and JSON sidecar.
+        if file_tpl.entities.get("suffix") in _FIELDMAP_SUFFIXES:
+            acq_obj = MRObject(acq)
+            session.graph.hadMember(collection, acq_obj)
+            acq_obj.add_attributes(
+                {Constants.NIDM_IMAGE_USAGE_TYPE: Constants.NIDM_MRI_FIELDMAP}
+            )
+            acq_obj.add_attributes(
+                {
+                    Constants.NIDM_FILENAME: getRelPathToBIDS(
+                        join(file_tpl.dirname, file_tpl.filename),
+                        directory,
+                        bidsuri_format=True,
+                    )
+                }
+            )
+            addGitAnnexSources(
+                obj=acq_obj,
+                filepath=join(file_tpl.dirname, file_tpl.filename),
+                bids_root=directory,
+            )
+            if isfile(join(directory, file_tpl.dirname, file_tpl.filename)):
+                acq_obj.add_attributes(
+                    {
+                        Constants.CRYPTO_SHA512: getsha512(
+                            join(directory, file_tpl.dirname, file_tpl.filename)
+                        )
+                    }
+                )
+            else:
+                logging.info(
+                    "WARNING file %s doesn't exist! No SHA512 sum stored in NIDM files...",
+                    join(directory, file_tpl.dirname, file_tpl.filename),
+                )
+            if "run" in file_tpl.entities:
+                acq_obj.add_attributes(
+                    {BIDS_Constants.json_keys["run"]: file_tpl.tags["run"].value}
+                )
+            json_data = _read_scan_sidecar(directory, file_tpl)
+            if len(json_data) > 0:
+                for key, value in json_data.items():
+                    normalized_key = key.replace(" ", "_")
+                    if normalized_key in BIDS_Constants.json_keys:
+                        if isinstance(value, list):
+                            acq_obj.add_attributes(
+                                {
+                                    BIDS_Constants.json_keys[normalized_key]: "".join(
+                                        str(e) for e in value
+                                    )
+                                }
+                            )
+                        else:
+                            acq_obj.add_attributes(
+                                {BIDS_Constants.json_keys[normalized_key]: value}
+                            )
+            continue
+
         if file_tpl.entities["datatype"] == "anat":
             # do something with anatomicals
             acq_obj = MRObject(acq)
@@ -463,6 +541,12 @@ def addimagingsessions(
                 logging.info(
                     "WARNING file %s doesn't exist! No SHA512 sum stored in NIDM files...",
                     join(directory, file_tpl.dirname, file_tpl.filename),
+                )
+            # add run entity if present (matches the func/dwi branches and the
+            # LinkML tool, which emit the BIDS run index on every scan)
+            if "run" in file_tpl.entities:
+                acq_obj.add_attributes(
+                    {BIDS_Constants.json_keys["run"]: file_tpl.tags["run"].value}
                 )
             # get associated JSON file if exists
             # There is T1w.json file with information
@@ -1174,7 +1258,7 @@ def bidsmri2project(
 
     # get BIDS layout
     bids.config.set_option("extension_initial_dot", True)
-    bids_layout = bids.BIDSLayout(directory)
+    bids_layout = bids.BIDSLayout(directory, validate=False)
 
     # create empty dictionary for sessions where key is subject id and used later to link scans to same session as demographics
     session = {}

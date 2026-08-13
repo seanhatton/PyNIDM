@@ -409,6 +409,7 @@ NIDM_MRI_ANATOMIC_SCAN = QualifiedName(provNamespace("nidm", NIDM), "Anatomical"
 NIDM_MRI_STRUCTURE_SCAN = QualifiedName(provNamespace("nidm", NIDM), "Structural")
 NIDM_MRI_FUNCTION_SCAN = QualifiedName(provNamespace("nidm", NIDM), "Functional")
 NIDM_MRI_DWI_SCAN = QualifiedName(provNamespace("nidm", NIDM), "DiffusionWeighted")
+NIDM_MRI_FIELDMAP = QualifiedName(provNamespace("nidm", NIDM), "FieldMap")
 NIDM_MRI_DWI_BVAL = QualifiedName(provNamespace("nidm", NIDM), "b-value")
 NIDM_MRI_DWI_BVEC = QualifiedName(provNamespace("nidm", NIDM), "b-vector")
 NIDM_MRI_FUNCTION_TASK = QualifiedName(provNamespace("nidm", NIDM), "Task")
@@ -638,6 +639,7 @@ nidm_experiment_terms = [
     NIDM_MRI_STRUCTURE_SCAN,
     NIDM_MRI_FUNCTION_SCAN,
     NIDM_MRI_DWI_SCAN,
+    NIDM_MRI_FIELDMAP,
     NIDM_MRI_DWI_BVAL,
     NIDM_MRI_DWI_BVEC,
     NIDM_MRI_FUNCTION_TASK,
