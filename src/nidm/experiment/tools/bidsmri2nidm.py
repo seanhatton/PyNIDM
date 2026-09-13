@@ -568,28 +568,25 @@ def addimagingsessions(
                                 {BIDS_Constants.json_keys[normalized_key]: value}
                             )
 
-                        # Parse scan-specific JSON file in BIDS directory to add the attributes contained inside
-            # Look for standard BIDS naming: sub-<id>[_ses-<ses>]_<scan>.json
-            if os.path.isdir(os.path.join(directory)):
-                # Create the expected BIDS filename based on the current scan
-                # Get subject and session from the file template
-                subject_part = f"sub-{subject_id}"
-                session_part = f"_ses-{img_session}" if img_session else ""
-                
-                # Build the expected filename based on the scan type
-                scan_suffix = file_tpl.entities.get("suffix", "T1w")
-                expected_json_filename = f"{subject_part}{session_part}_{scan_suffix}.json"
-                
-                try:
-                    with open(
-                        os.path.join(directory, expected_json_filename), encoding="utf-8"
-                    ) as data_file:
-                        dataset = json.load(data_file)
-                except OSError:
-                    logging.warning(
-                        f"Cannot find {expected_json_filename} file...continuing anyway"
-                    )
-                    dataset = {}
+                        # Parse scan-specific JSON file in the same directory as the NIfTI file
+                        # Look for standard BIDS naming: sub-<id>[_ses-<ses>]_<scan>.json in the same directory as the NIfTI
+                        scan_path = join(file_tpl.dirname, file_tpl.filename)
+                        name = os.path.basename(scan_path)
+                        stem = name
+                        for ext in (".nii.gz", ".nii"):
+                            if name.endswith(ext):
+                                stem = name[: -len(ext)]
+                                break
+                        expected_json_path = join(file_tpl.dirname, f"{stem}.json")
+            
+                        try:
+                            with open(expected_json_path, encoding="utf-8") as data_file:
+                                dataset = json.load(data_file)
+                        except OSError:
+                            logging.warning(
+                                f"Cannot find sidecar JSON file {expected_json_path}...continuing anyway"
+                            )
+                            dataset = {}
 
             else:
                 logging.critical(
@@ -763,26 +760,23 @@ def addimagingsessions(
                         {Constants.PROV["Location"]: "file:/" + events_file[0].path}
                     )
 
-                        # Parse task-bold.json file in BIDS directory to add the attributes contained inside
-            # Look for standard BIDS naming: sub-<id>[_ses-<ses>]_task-<task>_bold.json
-            if os.path.isdir(os.path.join(directory)):
-                # Create the expected BIDS filename based on the current scan
-                # Get subject and session from the file template
-                subject_part = f"sub-{subject_id}"
-                session_part = f"_ses-{img_session}" if img_session else ""
-                
-                # Build the expected filename based on the scan type
-                task_name = file_tpl.entities.get("task", "rest")
-                expected_json_filename = f"{subject_part}{session_part}_task-{task_name}_bold.json"
-                
+                # Parse task-bold.json file in the same directory as the NIfTI file
+                # Look for standard BIDS naming: sub-<id>[_ses-<ses>]_task-<task>_bold.json in the same directory as the NIfTI
+                scan_path = join(file_tpl.dirname, file_tpl.filename)
+                name = os.path.basename(scan_path)
+                stem = name
+                for ext in (".nii.gz", ".nii"):
+                    if name.endswith(ext):
+                        stem = name[: -len(ext)]
+                        break
+                expected_json_path = join(file_tpl.dirname, f"{stem}.json")
+
                 try:
-                    with open(
-                        os.path.join(directory, expected_json_filename), encoding="utf-8"
-                    ) as data_file:
+                    with open(expected_json_path, encoding="utf-8") as data_file:
                         dataset = json.load(data_file)
                 except OSError:
                     logging.warning(
-                        f"Cannot find {expected_json_filename} file...continuing anyway"
+                        f"Cannot find sidecar JSON file {expected_json_path}...continuing anyway"
                     )
                     dataset = {}
             else:
