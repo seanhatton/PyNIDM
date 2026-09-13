@@ -4,7 +4,7 @@ It will parse phenotype information and simply store variables/values and link
 to the associated json data dictionary file.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 from argparse import ArgumentParser, RawTextHelpFormatter
 import csv
@@ -568,33 +568,28 @@ def addimagingsessions(
                                 {BIDS_Constants.json_keys[normalized_key]: value}
                             )
 
-            # Parse T1w.json file in BIDS directory to add the attributes contained inside
+                        # Parse scan-specific JSON file in BIDS directory to add the attributes contained inside
+            # Look for standard BIDS naming: sub-<id>[_ses-<ses>]_<scan>.json
             if os.path.isdir(os.path.join(directory)):
+                # Create the expected BIDS filename based on the current scan
+                # Get subject and session from the file template
+                subject_part = f"sub-{subject_id}"
+                session_part = f"_ses-{img_session}" if img_session else ""
+                
+                # Build the expected filename based on the scan type
+                scan_suffix = file_tpl.entities.get("suffix", "T1w")
+                expected_json_filename = f"{subject_part}{session_part}_{scan_suffix}.json"
+                
                 try:
                     with open(
-                        os.path.join(directory, "T1w.json"), encoding="utf-8"
+                        os.path.join(directory, expected_json_filename), encoding="utf-8"
                     ) as data_file:
                         dataset = json.load(data_file)
                 except OSError:
                     logging.warning(
-                        "Cannot find T1w.json file...looking for session-specific one"
+                        f"Cannot find {expected_json_filename} file...continuing anyway"
                     )
-                    try:
-                        if img_session is not None:
-                            with open(
-                                os.path.join(
-                                    directory, "ses-" + img_session + "_T1w.json"
-                                ),
-                                encoding="utf-8",
-                            ) as data_file:
-                                dataset = json.load(data_file)
-                        else:
-                            dataset = {}
-                    except OSError:
-                        logging.warning(
-                            "Cannot find session-specific T1w.json file which is required in the BIDS spec..continuing anyway"
-                        )
-                        dataset = {}
+                    dataset = {}
 
             else:
                 logging.critical(
@@ -768,34 +763,28 @@ def addimagingsessions(
                         {Constants.PROV["Location"]: "file:/" + events_file[0].path}
                     )
 
-            # Parse task-rest_bold.json file in BIDS directory to add the attributes contained inside
+                        # Parse task-bold.json file in BIDS directory to add the attributes contained inside
+            # Look for standard BIDS naming: sub-<id>[_ses-<ses>]_task-<task>_bold.json
             if os.path.isdir(os.path.join(directory)):
+                # Create the expected BIDS filename based on the current scan
+                # Get subject and session from the file template
+                subject_part = f"sub-{subject_id}"
+                session_part = f"_ses-{img_session}" if img_session else ""
+                
+                # Build the expected filename based on the scan type
+                task_name = file_tpl.entities.get("task", "rest")
+                expected_json_filename = f"{subject_part}{session_part}_task-{task_name}_bold.json"
+                
                 try:
                     with open(
-                        os.path.join(directory, "task-rest_bold.json"), encoding="utf-8"
+                        os.path.join(directory, expected_json_filename), encoding="utf-8"
                     ) as data_file:
                         dataset = json.load(data_file)
                 except OSError:
                     logging.warning(
-                        "Cannot find task-rest_bold.json file looking for session-specific one"
+                        f"Cannot find {expected_json_filename} file...continuing anyway"
                     )
-                    try:
-                        if img_session is not None:
-                            with open(
-                                os.path.join(
-                                    directory,
-                                    "ses-" + img_session + "_task-rest_bold.json",
-                                ),
-                                encoding="utf-8",
-                            ) as data_file:
-                                dataset = json.load(data_file)
-                        else:
-                            dataset = {}
-                    except OSError:
-                        logging.warning(
-                            "Cannot find session-specific task-rest_bold.json file which is required in the BIDS spec..continuing anyway"
-                        )
-                        dataset = {}
+                    dataset = {}
             else:
                 logging.critical(
                     "Error: BIDS directory %s does not exist!", os.path.join(directory)
