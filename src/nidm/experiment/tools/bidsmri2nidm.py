@@ -588,12 +588,6 @@ def addimagingsessions(
                             )
                             dataset = {}
 
-            else:
-                logging.critical(
-                    "Error: BIDS directory %s does not exist!", os.path.join(directory)
-                )
-                sys.exit(-1)
-
             # add various attributes if they exist in BIDS dataset
             for key in dataset:
                 # if key from T1w.json file is mapped to term in BIDS_Constants.py then add to NIDM object
@@ -770,7 +764,7 @@ def addimagingsessions(
                         stem = name[: -len(ext)]
                         break
                 expected_json_path = join(file_tpl.dirname, f"{stem}.json")
-
+            
                 try:
                     with open(expected_json_path, encoding="utf-8") as data_file:
                         dataset = json.load(data_file)
@@ -779,11 +773,6 @@ def addimagingsessions(
                         f"Cannot find sidecar JSON file {expected_json_path}...continuing anyway"
                     )
                     dataset = {}
-            else:
-                logging.critical(
-                    "Error: BIDS directory %s does not exist!", os.path.join(directory)
-                )
-                sys.exit(-1)
 
             # add various attributes if they exist in BIDS dataset
             for key in dataset:
